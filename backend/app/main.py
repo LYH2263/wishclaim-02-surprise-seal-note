@@ -5,6 +5,9 @@ from pydantic import BaseModel
 from app import seed
 from app.db import connect
 from app.engines.claim_lock import claim_allowed, lock_payload, release_if_expired
+from app.modules.seal_note.policy import note_edit_allowed
+from app.modules.seal_note.projection import project_rows, project_wish
+from app.modules.seal_note.reveal import apply_reveal
 
 app = FastAPI(title="Wishclaim", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -31,25 +34,45 @@ def health(): return {"ok": True, "project": "wishclaim"}
 @app.get("/api/wishes")
 def list_wishes():
     c = connect(); sweep(c); c.commit()
-    rows = [dict(r) for r in c.execute("SELECT * FROM wishes ORDER BY id DESC")]; c.close(); return rows
+    rows = [dict(r) for r in c.execute("SELECT * FROM wishes ORDER BY id DESC")]; c.close()
+    return project_rows(rows)
 
 @app.get("/api/wishes/{wid}")
 def get_wish(wid: int):
     c = connect(); sweep(c); c.commit()
     r = c.execute("SELECT * FROM wishes WHERE id=?", (wid,)).fetchone(); c.close()
     if not r: raise HTTPException(404, "not found")
-    return dict(r)
+    return project_wish(dict(r))
 
 class WishIn(BaseModel):
     title: str
     note: str = ""
+    seal_note: bool = False
 
 @app.post("/api/wishes")
 def create_wish(body: WishIn):
     c = connect()
-    cur = c.execute("INSERT INTO wishes(title,note,status,data_quality) VALUES (?,?,?,?)",
-                    (body.title, body.note, "open", "clean"))
+    cur = c.execute("INSERT INTO wishes(title,note,status,data_quality,seal_note) VALUES (?,?,?,?,?)",
+                    (body.title, body.note, "open", "clean", int(body.seal_note)))
     c.commit(); wid = cur.lastrowid; c.close(); return {"id": wid}
+
+class NoteEditIn(BaseModel):
+    note: str | None = None
+    seal_note: bool | None = None
+
+@app.patch("/api/wishes/{wid}/note")
+def edit_note(wid: int, body: NoteEditIn):
+    c = connect(); sweep(c); c.commit()
+    r = c.execute("SELECT * FROM wishes WHERE id=?", (wid,)).fetchone()
+    if not r: c.close(); raise HTTPException(404, "not found")
+    allowed = note_edit_allowed(bool(r["seal_note"]), r["status"])
+    if not allowed["ok"]:
+        c.close(); raise HTTPException(409, allowed["reason"])
+    note = r["note"] if body.note is None else body.note
+    seal = r["seal_note"] if body.seal_note is None else int(body.seal_note)
+    c.execute("UPDATE wishes SET note=?, seal_note=? WHERE id=?", (note, seal, wid))
+    c.commit(); c.close()
+    return {"ok": True, "seal_note": bool(seal)}
 
 class ClaimIn(BaseModel):
     claimer: str
@@ -85,17 +108,20 @@ def fulfill(wid: int):
     if r["status"] != "claimed":
         c.close(); raise HTTPException(400, "need_claim")
     c.execute("UPDATE wishes SET status='fulfilled' WHERE id=?", (wid,))
+    apply_reveal(c, r, now())
     c.commit(); c.close(); return {"ok": True, "status": "fulfilled"}
 
 @app.get("/api/mine")
 def mine(claimer: str):
     c = connect(); sweep(c); c.commit()
-    rows = [dict(r) for r in c.execute("SELECT * FROM wishes WHERE claimer=?", (claimer,))]; c.close(); return rows
+    rows = [dict(r) for r in c.execute("SELECT * FROM wishes WHERE claimer=?", (claimer,))]; c.close()
+    return project_rows(rows)
 
 @app.get("/api/done")
 def done():
     c = connect()
-    rows = [dict(r) for r in c.execute("SELECT * FROM wishes WHERE status='fulfilled'")]; c.close(); return rows
+    rows = [dict(r) for r in c.execute("SELECT * FROM wishes WHERE status='fulfilled'")]; c.close()
+    return project_rows(rows)
 
 @app.get("/api/settings")
 def settings():
@@ -107,4 +133,7 @@ def rules():
         "mutex": "同一愿望同时只能被一人认领",
         "ttl": "认领超时未核销则自动释放",
         "fulfill": "核销后状态变为 fulfilled",
+        "seal_note": "惊喜附言封存:勾选后墙卡/公开详情/我的认领一律遮蔽明文,认领人核销前同样不可读",
+        "seal_reveal": "核销时揭晓落库,已完成页与详情同步展示附言全文",
+        "seal_edit": "封存附言在已认领未核销期间禁止改写;未认领(open/released)可改,已核销不可再改",
     }

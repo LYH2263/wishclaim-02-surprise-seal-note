@@ -35,3 +35,6 @@ button.ghost { background: transparent; color: var(--ink); border: 1px solid var
 input, textarea { width: 100%; padding: 10px; border-radius: 12px; border: 1px solid var(--line); font: inherit; margin: 6px 0 12px; background: #fff; }
 .menu-btn { position: fixed; left: 16px; top: 16px; z-index: 10; }
 .err { color: #a33; }
+.sealed { color: var(--muted); font-style: italic; }
+.seal-opt { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; font-size: 14px; color: var(--muted); }
+.seal-opt input { width: auto; margin: 0; }
